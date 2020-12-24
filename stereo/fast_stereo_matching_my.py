@@ -12,6 +12,7 @@ from scipy.signal import medfilt
 from scipy.sparse import coo_matrix
 from scipy.sparse import bsr_matrix
 import math
+from utils import fill_invalid, weighted_median_filter
 
 
 ###
@@ -27,8 +28,8 @@ os.makedirs(save_path, exist_ok=True)
 parser = argparse.ArgumentParser()
 parser.add_argument('--left_image', '-l', default = './source_images/tsukuba-l.png', type=str, help='left image path')
 parser.add_argument('--right_image', '-r', default = './source_images/tsukuba-r.png', type=str, help='right image path')
-parser.add_argument('--disparity_image', '-o', default = './fast_images/fast_tsukuba_my2.png', type=str, help='disparity image path')
-parser.add_argument('--bilateral', action='store_true', help='use bilateral filter for cost aggregation, default=guided filter')
+parser.add_argument('--disparity_image', '-o', default = './fast_images/fast_tsukuba_my.png', type=str, help='disparity image path')
+parser.add_argument('--bilateral', '-b', action='store_true', help='use bilateral filter for cost aggregation, default=guided filter')
 args = parser.parse_args()
 
 
@@ -153,8 +154,8 @@ def computeDisp(left_image_path, right_image_path, max_disp):
 
     depth_left = np.argmin(cost_volume_left, axis = 2)
     depth_right = np.argmin(cost_volume_right, axis = 2)
-    # imageio.imwrite('./left_test.png', depth_left)
-    # imageio.imwrite('./right_test.png', depth_right)
+    imageio.imwrite('./fast_images/left_test.png', depth_left)
+    imageio.imwrite('./fast_images/right_test.png', depth_right)
 
     toc = time.time()
     print('* Elapsed time (disparity optimization): %f sec.' % (toc - tic))
@@ -175,7 +176,10 @@ def computeDisp(left_image_path, right_image_path, max_disp):
             if abs(left_depth - right_depth) >= 1:
                 depth[row, col] = -1
 
-    # imageio.imwrite('./check_test.png', depth)
+    left_right_consistancy = depth.copy()
+    left_right_consistancy[left_right_consistancy!=-1] = 0
+    left_right_consistancy[left_right_consistancy==-1] = 255
+    imageio.imwrite('./fast_images/left_right_consistancy.png', left_right_consistancy)
 
     occluded_pixel, filled_depth = fill_invalid(depth, max_disp)
     # imageio.imwrite('./filled_test.png', filled_depth)
@@ -187,75 +191,9 @@ def computeDisp(left_image_path, right_image_path, max_disp):
     print('* Elapsed time (disparity refinement): %f sec.' % (toc - tic))
 
 
-def fill_invalid(depth, max_disp):
-    row_length, column_length = depth.shape
-    # occlude 위치 저장
-    occluded_pixel = np.zeros((row_length, column_length))
-    occluded_pixel[depth<0] = 1
-    
-    # left
-    fillVals = np.ones((row_length)) * max_disp
-    depth_left = depth.copy()
-    for col in range(column_length):
-        curCol = depth[:,col].copy()
-        curCol[curCol==-1] = fillVals[curCol==-1] # 현재 열에서 occluded 된 위치 가져옴
-        fillVals[curCol!=-1] = curCol[curCol!=-1] # 다음 열로 전달
-        depth_left[:,col] = curCol
-    
-    # right
-    fillVals = np.ones((row_length)) * max_disp
-    depth_right = depth.copy()
-    for col in reversed(range(column_length)):
-        curCol = depth[:,col].copy()
-        curCol[curCol==-1] = fillVals[curCol==-1]
-        fillVals[curCol!=-1] = curCol[curCol!=-1]
-        depth_right[:,col] = curCol
-
-    filled_depth = np.fmin(depth_left, depth_right)
-    return occluded_pixel, filled_depth
-
-
-def weighted_median_filter(left_img_origin, filled_depth, occluded_pixel, r_median, max_disp):
-    row_length, column_length, _ = left_img_origin.shape
-    filtered_img = cv2.medianBlur(left_img_origin, 3) # 이미지 median blur
-
-    window_size = r_median // 2
-    weighted_median = np.ones((row_length, column_length)) * -1
-
-    for row in range(row_length):
-        print('[%d/%d]' % (row, row_length))
-        for col in range(column_length):
-            if occluded_pixel[row, col] == 0: # occluede 아닌 픽셀은 무시함
-                continue
-
-            weights = [0.0 for _ in range(max_disp+1)]
-            total_sum = 0.0
-            for i in range(max(row - window_size, 0), min(row + window_size, row_length)):
-                for j in range(max(col - window_size, 0), min(col + window_size, column_length)):
-                    # 현재 픽셀에서 멀리 떨어질수록 weight 적게 줌
-                    spatial_diff = np.sqrt( np.square(row-i) + np.square(col-j) )
-                    # color 값 변화가 크면 weight 를 적게줌
-                    color_diff = np.sqrt( np.sum( np.square(filtered_img[row, col, :] - filtered_img[i, j, :]), axis=-1 )  )
-
-                    weight = np.exp( - spatial_diff/(sigma_s*sigma_s) - color_diff/(sigma_c*sigma_c) )
-                    weights[filled_depth[i, j]] += weight
-                    total_sum += weight
-            
-            # 임계값을 넘어간 순간 occlude 픽셀을 해당 값으로 치환
-            cum_sum = 0.0
-            for i in range(max_disp+1):
-                cum_sum += weights[i]
-                if (cum_sum > total_sum / 2):
-                    weighted_median[row, col] = i
-                    break
-    
-    filled_depth[weighted_median!=-1] = weighted_median[weighted_median!=-1]
-    return filled_depth
-
-
 def main():
     # 카메라 베이스라인 최대치를 16 으로
-    max_disp = 16
+    max_disp = 15
     computeDisp(args.left_image, args.right_image, max_disp)
 
 

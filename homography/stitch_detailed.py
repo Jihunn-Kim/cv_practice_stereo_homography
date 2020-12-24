@@ -131,13 +131,11 @@ if __name__ == '__main__':
     images = [None for num in range(num_camera)]
     full_img_sizes = [None for num in range(num_camera)]
 
-    #test_img = ["1Hill.jpg", "2Hill.jpg"]
 
     is_work_scale_set = False
     is_seam_scale_set = False
     for idx in range(num_camera):
         full_img = web_cameras[idx].read()
-        # full_img = cv2.imread(test_img[idx])
         cv2.imshow("%s" % (idx), full_img)
 
         full_img_sizes[idx] = ((full_img.shape[1], full_img.shape[0]))

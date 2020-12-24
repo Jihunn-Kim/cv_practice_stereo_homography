@@ -5,16 +5,18 @@ import cv2
 import imageio
 import os
 import argparse
+from utils import fill_invalid, weighted_median_filter
+import math
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--left_image', '-l', default = './source_images/Piano-l.png', type=str, help='left image path')
+parser.add_argument('--left_image', '-l', default = './source_images/tsukuba-l.png', type=str, help='left image path')
 parser.add_argument('--right_image', '-r', default = './source_images/Piano-r.png', type=str, help='right image path')
 parser.add_argument('--save_image', '-s', default = './dp_images/dp_cone.png', type=str, help='save image path')
 parser.add_argument('--occlusion_cost', '-o', default = 1000, type=int, help='occlusion cost for dp')
 parser.add_argument('--block_size', '-p', default = 5, type=int, help='block size for dissimilarity')
 parser.add_argument('--camera_baesline', '-c', default = 64, type=int, help='camera baseline, scan line consistency')
-parser.add_argument('--match_cost', '-m', default = 'grad', type=str, help='type of cost computation [abs, sqr, ncc, grad]')
+parser.add_argument('--match_cost', '-m', default = 'grad', type=str, help='type of cost computation [abs, sqr, ncc, grad, census]')
 parser.add_argument('--filter', '-f', action='store_true') # store_true의 경우 default 값은 false이며, 인자를 적어 주면 true가 저장된다.
 parser.add_argument('--filter_type', '-ft', default = 'gaussian', type=str, help='filter type [gaussian, bilateral, guided]')
 parser.add_argument('--kernel_size', '-cs', default = 3, type=int, help='gaussian filter kernel size')
@@ -23,55 +25,44 @@ parser.add_argument('--fill_type', '-flt', default = 'wmf', type=str, help='occu
 parser.add_argument('--resize_scale', '-rs', default = 0.3, type=float, help='resize 2014 data set')
 args = parser.parse_args()
 print(args)
+print()
 
+# 이미지 저장 경로 생성
+save_path = './dp_images'
+os.makedirs(save_path, exist_ok=True)
 
-# # read in image
-# im = plt.imread('./dp_images/dp_cone_before.png')
-# print(im.shape)
-# # plot image in color
-# plt.imshow(im, cmap="jet")
-# #save image in color
-# # plt.imsave("color.png", im, cmap="jet")
-# plt.show()
-# exit(0)
+filename, file_extension = os.path.splitext(args.save_image)
+insert_name = '_%d_%d_%s' % (args.occlusion_cost, args.camera_baesline, args.match_cost)
+save_image_name = filename + insert_name + file_extension
+print('save image name:', save_image_name)
 
-# Image read as grayscale
-# left_img_origin = Image.open(args.left_image)
-# img_L = left_img_origin.convert('L')  # grayscale
-
-# left_img_origin = np.asarray(left_img_origin)
-# img_L = np.asarray(img_L)
-
-# right_img_origin = Image.open(args.right_image)
-# img_R = right_img_origin.convert('L')  # grayscale
-
-# right_img_origin = np.asarray(right_img_origin)
-# img_R = np.asarray(img_R)
-
+# 이미지 읽기
 left_img_origin = cv2.imread(args.left_image)
 right_img_origin = cv2.imread(args.right_image)
 print('image shape:', left_img_origin.shape)
 
+# 수행 속도때문에 2014 데이터 셋 크기 조절
 if args.resize_scale != 1:
-    left_img_origin = cv2.resize(left_img_origin, (0, 0), fx=0.3, fy=0.3, interpolation=cv2.INTER_AREA)
-    right_img_origin = cv2.resize(right_img_origin, (0, 0), fx=0.3, fy=0.3, interpolation=cv2.INTER_AREA)
+    # cv2.INTER_AREA, 영상 축소 시 디테일을 보존
+    left_img_origin = cv2.resize(left_img_origin, (0, 0), fx=args.resize_scale, fy=args.resize_scale, interpolation=cv2.INTER_AREA)
+    right_img_origin = cv2.resize(right_img_origin, (0, 0), fx=args.resize_scale, fy=args.resize_scale, interpolation=cv2.INTER_AREA)
     print(args.resize_scale, 'resized image shape:', left_img_origin.shape)
 
+# 흑백 이미지
 img_L = cv2.cvtColor(left_img_origin, cv2.COLOR_BGR2GRAY)
 img_R = cv2.cvtColor(right_img_origin, cv2.COLOR_BGR2GRAY)
 
-# cv2.imshow('left', left_img_origin)
-# cv2.imshow('right', right_img_origin)
-# cv2.waitKey(0)
-# exit(0)
 
 if args.filter:
     print('filter:', args.filter_type)
     if args.filter_type == 'gaussian':
-        # Get gaussian filter
-        filter = cv2.getGaussianKernel(ksize=args.kernel_size, sigma=1)
+        # Make laplacian filter
+        # filter = np.array([[-1, -1, -1],
+        #                 [-1,  8, -1],
+        #                 [-1, -1, -1]])
 
         # Make 2D gaussian filter ( Option )
+        filter = cv2.getGaussianKernel(ksize=args.kernel_size, sigma=1)
         filter = filter * filter.T
 
         # Apply filter to image
@@ -79,15 +70,21 @@ if args.filter:
         img_R = cv2.filter2D(img_R, -1, filter)
 
     elif args.filter_type == 'bilateral':
-        img_L = cv2.bilateralFilter(img_L, 7, 50, 50)
-        img_R = cv2.bilateralFilter(img_R, 7, 50, 50)
+        d = 7           # d : 필터링에 이용하는 이웃한 픽셀의 지름을 정의 불가능한경우 sigmaspace 를 사용
+        sigmaColor = 50 # sigmaColor : 컬러공간의 시그마공간 정의, 클수록 이웃한 픽셀과 기준색상의 영향이 커진다
+        sigmaSpace = 50 # sigmaSpace : 시그마 필터를 조정한다. 값이 클수록 긴밀하게 주변 픽셀에 영향을 미친다. d>0 이면 영향을 받지 않고, 그 외에는 d 값에 비례한다. 
+                        # https://eehoeskrap.tistory.com/125 
+
+        img_L = cv2.bilateralFilter(img_L, d, sigmaColor, sigmaSpace)
+        img_R = cv2.bilateralFilter(img_R, d, sigmaColor, sigmaSpace)
         # cv2.imshow('left', img_L)
         # cv2.imshow('right', img_R)
         # cv2.waitKey(0)
 
     elif args.filter_type == 'guided':
         r = 9
-        eps = 0.01
+        eps = 0.01 # 작을수록 엣지가 살아나며 클수록 mean필터에 가까워짐
+
         img_L = cv2.ximgproc.guidedFilter(left_img_origin, img_L, r, eps)
         img_R = cv2.ximgproc.guidedFilter(right_img_origin, img_R, r, eps)
         # cv2.imshow('left', img_L)
@@ -103,19 +100,18 @@ block_size = args.block_size
 half_size = block_size // 2
 
 # depth map
-disparity_left = np.zeros(img_L.shape)
-disparity_right = np.zeros(img_L.shape)
+disparity_left = np.zeros(img_L.shape, np.int32)
+disparity_right = np.zeros(img_L.shape, np.int32)
 
 occlusion_cost = args.occlusion_cost
 camera_baesline = args.camera_baesline
+print('occlusion cost:', occlusion_cost)
 
 # matching cost 변화에 따라 파라미터 조정
 if args.match_cost == 'ncc':
-    occlusion_cost = -0.4
     eps = 1e-6
 elif args.match_cost == 'grad':
     # dissimilarity 미리 계산
-    occlusion_cost = 40
     threshBorder = 3
     thresColor = 7
     thresGrad = 2
@@ -160,6 +156,26 @@ elif args.match_cost == 'grad':
     # depth_left = np.argmin(cost_volume, axis = 2)
     # imageio.imwrite('./grad_test.png', depth_left)
     # exit(0)
+elif args.match_cost == 'census':
+    # dissimilarity 미리 계산 - absolute difference 만, census 는 for 문에서
+    lambdaAd = 10.
+    lambdaCensus = 5.
+
+    cost_ad = np.ones((row_length, column_length, camera_baesline + 1)).astype(np.float32)
+
+    # 0 ~ camera_baesline 에 해당하는 cost 계산
+    for d in range(camera_baesline + 1):
+        print('grad cost:', d)
+        # color cost
+        cost_temp = np.ones((row_length, column_length, channel_length))
+        cost_temp[:, d:, :] = right_img_origin[:, :column_length-d, :]
+        cost_temp = abs(left_img_origin - cost_temp)
+        cost_temp = np.mean(cost_temp, axis = 2) # bgr mean
+        cost_ad[:, :, d] = cost_temp
+
+    # depth_left = np.argmin(cost_ad, axis = 2)
+    # imageio.imwrite('./grad_test.png', depth_left)
+    # exit(0)
 
 
 for row_idx in range(half_size, row_length - half_size):
@@ -174,13 +190,9 @@ for row_idx in range(half_size, row_length - half_size):
 
     for i in range(half_size, column_length - half_size): # right image
         mask_R = img_R[row_idx-half_size:row_idx+half_size+1, i-half_size:i+half_size+1]
-        if args.match_cost == 'grad':
-            color_mask_R = right_img_origin[row_idx-half_size:row_idx+half_size+1, i-half_size:i+half_size+1]
         
         for j in range(i, min(i + camera_baesline + 1, column_length - half_size)): # left image - scan line consistency
             mask_L = img_L[row_idx-half_size:row_idx+half_size+1, j-half_size:j+half_size+1]
-            if args.match_cost == 'grad':
-                color_mask_L = left_img_origin[row_idx-half_size:row_idx+half_size+1, i-half_size:i+half_size+1]
 
             if args.match_cost == 'sqr':
                 dissimilarity = np.sum((mask_R - mask_L) ** 2)
@@ -192,6 +204,15 @@ for row_idx in range(half_size, row_length - half_size):
                 dissimilarity = -np.sum(mask_R * mask_L) # 음수로 만듦, 값이 작을수록 좋다
             elif args.match_cost == 'grad':
                 dissimilarity = np.sum(cost_volume[row_idx-half_size:row_idx+half_size+1, j-half_size:j+half_size+1, j-i])
+            elif args.match_cost == 'census':
+                p_ad = np.sum(cost_ad[row_idx-half_size:row_idx+half_size+1, j-half_size:j+half_size+1, j-i])
+
+                # 중앙 값보다 작으면 0, 아니면 1
+                mask_R = np.where(mask_R < mask_R[half_size, half_size], 0, 1)
+                mask_L = np.where(mask_L < mask_L[half_size, half_size], 0, 1)
+                p_census = np.sum( np.logical_xor(mask_R, mask_L) )
+                dissimilarity = (1 - math.exp(-p_ad / lambdaAd)) + (1 - math.exp(-p_census / lambdaCensus))
+                # print(dissimilarity)
 
             # 세방향 값 계산
             min1 = dp[i - 1, j - 1] + dissimilarity
@@ -226,11 +247,9 @@ for row_idx in range(half_size, row_length - half_size):
             i = i - 1
         elif back_track[i, j] == 3:
             j = j - 1
-    # break
-
-
-disparity_left = disparity_left.astype(np.int8)
-disparity_right = disparity_right.astype(np.int8)
+    
+    # if row_idx == row_length // 3:
+    #     break
 
 
 if args.filling:
@@ -269,10 +288,12 @@ if args.filling:
         for row in range(row_length):
             for col in range(column_length):
                 left_depth = disparity_left[row, col]
+                # index 범위
                 if left_depth > col:
                     continue
 
                 right_depth = disparity_right[row, col-left_depth]
+                # 왼쪽, 오른쪽 1 이상 차이나면 다시 계산
                 if abs(left_depth - right_depth) >= 1:
                     depth[row, col] = -1
 
@@ -282,13 +303,13 @@ if args.filling:
 
 
 # save image
-save_path = './dp_images'
-os.makedirs(save_path, exist_ok=True)
-# imageio.imwrite(os.path.join(save_path, 'dp_depth_%s_%d_%d.png' % (args.match_cost, block_size, occlusion_cost)), disparity_left)
-imageio.imwrite(args.save_image, disparity_left)
+imageio.imwrite(save_image_name, disparity_left)
 
+
+# plot 여러개
 # plt.subplot(121)
 # plt.imshow(disparity_left, cmap='gray'); plt.axis('off')
+# plt.xticks([]), plt.yticks([])
 
 # plt.subplot(122)
 # plt.imshow(disparity_right, cmap='gray'); plt.axis('off')
