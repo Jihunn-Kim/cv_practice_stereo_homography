@@ -8,4 +8,5 @@
 - dynamic programming 사용
 - matching cost: ssd, ncc, color+gradient
 - left-right consistency check
+- [source images](https://vision.middlebury.edu/stereo/data/scenes2014)
 <img src='images/stereo.png' width=400>
